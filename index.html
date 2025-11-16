@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Alabama Integrated Mobility Guide</title>
+  
+  <link rel="stylesheet" href="https://js.arcgis.com/4.29/esri/themes/light/main.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://js.arcgis.com/4.29/"></script>
+
+  <style>
+    html, body, #viewDiv { padding: 0; margin: 0; height: 100%; width: 100%; }
+    .esri-widget { font-family: 'Inter', sans-serif !important; }
+    
+    #uiPanel {
+      width: 400px; 
+      max-height: 90vh;
+      overflow-y: auto;
+      padding: 1.5rem;
+      padding-bottom: 3rem;
+      background-color: white; 
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
+      border-radius: 0.5rem; 
+      font-family: 'Inter', sans-serif;
+    }
+    
+    #planTripButton {
+      background-color: #1d4ed8;
+      color: white;
+      font-weight: 600;
+      padding: 0.75rem 1rem;
+      border-radius: 0.375rem;
+      width: 100%;
+      cursor: pointer;
+      border: none;
+    }
+    #planTripButton:hover {
+      background-color: #1e40af;
+    }
+    #planTripButton:disabled {
+      background-color: #9ca3af;
+      cursor: not-allowed;
+    }
+    
+    .step {
+      padding: 1rem;
+      margin-top: 1rem;
+      border-top: 1px solid #e5e7eb;
+    }
+    .step-button {
+      background-color: #f3f4f6;
+      color: #1d4ed8;
+      font-weight: 500;
+      padding: 0.25rem 0.75rem;
+      border-radius: 0.25rem;
+      cursor: pointer;
+      margin-left: 0.5rem;
+      border: none;
+    }
+    .step-button:hover {
+      background-color: #e5e7eb;
+    }
+    
+    #resultsPanel {
+      max-height: 60vh;
+      overflow-y: auto;
+    }
+    
+    #embedPanel {
+      max-height: 50vh;
+    }
+  </style>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body class="font-sans">
+  <div id="viewDiv"></div>
+
+  <div id="uiPanel">
+    <h1 class="text-2xl font-bold text-gray-800 mb-4">Alabama Transit Guide</h1>
+    
+    <div id="searchStartDiv"></div>
+    <div id="searchEndDiv" class="mt-2"></div>
+    
+    <button id="planTripButton" class="mt-4">Plan Trip</button>
+    
+    <div id="resultsPanel" class="mt-4" style="display: none;">
+      <h2 class="text-xl font-semibold text-gray-700 mb-2">Your Trip Plan</h2>
+      <div id="sequentialListDiv"></div>
+    </div>
+    
+    <div id="embedPanel" class="w-full h-80 mt-4" style="display: none;">
+      <h3 id="embedTitle" class="text-lg font-semibold mb-2"></h3>
+      <iframe id="embedFrame" class="w-full h-full border-0 rounded-md shadow-inner" src=""></iframe>
+    </div>
+  </div>
+
+  <script>
+    console.log("App script started...");
+
+    let view, searchStart, searchEnd, planTripButton;
+    let resultsPanel, sequentialListDiv, embedPanel, embedFrame, embedTitle;
+    let featureLayer, stopsLayer, Graphic;
+    let startPoint, endPoint;
+
+    const webmapId = "c4561ad8f2b44ffb96b96bc584e2bfb4"; 
+    const lineNetworkLayerUrl = "https://services.arcgis.com/ts4gk3YgS68yLGFl/arcgis/rest/services/Master_Line_Network_ExportFeatures/FeatureServer/107";
+    const stopsLayerUrl = "https://services.arcgis.com/ts4gk3YgS68yLGFl/arcgis/rest/services/All_Stops/FeatureServer/108"; 
+    
+    const MODE_FIELD = "Travel_Mode"; 
+    const AGENCY_FIELD = "Rural_Agency_ID";
+
+    // NTD ID to City/Agency mapping for urban transit
+    const urbanTransitAgencies = {
+      40044: {
+        name: "Birmingham (BJCTA)",
+        city: "Birmingham",
+        url: "https://www.bjcta.org/routes-schedules/"
+      },
+      40064: {
+        name: "Anniston Transit",
+        city: "Anniston",
+        url: "https://www.annistonal.gov/196/Public-Transportation"
+      },
+      40043: {
+        name: "Mobile (The Wave)",
+        city: "Mobile",
+        url: "https://www.thewavetransit.com/"
+      }
+      // Add more as needed
+    };
+    
+    // Special rural transit exceptions - agencies that serve outside their normal area
+    const ruralTransitExceptions = {
+      "Autauga County Rural Transportation": {
+        extendsTo: "Montgomery",
+        note: "Autauga County Rural Transportation can take you to Montgomery for medical and shopping appointments."
+      },
+      "BRATS": {
+        extendsTo: "Mobile", 
+        note: "BRATS can provide service to Mobile. Verify availability when booking."
+      }
+    };
+
+    // Rural Transit Agency URLs - mapped to actual agency IDs from GIS data
+    const ruralTransitAgencies = {
+      "ACTS": "https://earpdc.org/transportation-services/",
+      "ARISE Inc.": "https://arisetransportation.org/",
+      "ATRC": "https://www.atrcregion6.com/rural-transportation-program/",
+      "Autauga County Rural Transportation": "https://www.autaugaco.org/Default.asp?ID=148&pg=Rural+Transportation",
+      "BCPTS": "https://blountcountyal.gov/departments-services/public-transportation/",
+      "BRATS": "https://baldwincountyal.gov/departments/brats-public-bus-transportation",
+      "CARTS": "https://www.co.cullman.al.us/carts.html",
+      "CATS": "https://www.covingtoncountyal.gov/173/Covington-Area-Transit-System-CATS",
+      "Chilton_County_Transit": "https://chiltoncounty.org/chilton-county-transit/",
+      "CLASTRAN": "https://www.clastran.com/",
+      "Dekalb County Rural Public Transportation": "https://dekalbcountyal.us/rural-public-transportation/",
+      "EACTS": "https://www.escambiacountyal.gov/living___working/ecat/index.php",
+      "EBTA": "https://www.eufaulaalabama.com/165/Eufaula-Barbour-Transit-Authority",
+      "ECRT": "https://etowahcounty.org/department/rural-transportation/",
+      "Fayette_Transportation": "https://fayetteal.org/elementor-54330/",
+      "Guntersville Public Transportation": "https://guntersvilleal.org/departments/transportation/",
+      "H.E.L.P. Inc.": "https://www.alabamatransit.org/",
+      "Lawrence County Transportation": "https://www.icarol.info/ResultDetails.aspx?org=84123&agencynum=81246584",
+      "LRPT": "https://www.lrcog.com/public-transit/#toggle-id-2",
+      "Macon County Public Transportation System": "https://maconalabama.com/services/transportation.php",
+      "NACLOG": "https://www.nacolg.org/public-transit",
+      "PATS": "https://www.troyal.gov/PublicTransportation",
+      "RPT": "https://www.jccoa.com/styled-2/",
+      "SCAT": "https://www.stclairco.com/228/Public-Transportation",
+      "TRAM": "https://www.madisoncountyal.gov/departments/planning-and-economic-development/tram",
+      "Walker_County_Transportation_System": "https://www.walkercountytransportationsystem.org/",
+      "WAPT": "https://www.westalpt.com/",
+      "WCRPT": "https://wcalabama.com/washington-county-rural-public-transportation/",
+      "WTA": "https://searpdc.org/wiregrass-transit/#schedule-a-ride"
+    };
+
+    // DEFINE showEmbed GLOBALLY - This fixes the onclick issue
+    function showEmbed(agency) {
+      console.log("Showing embed for:", agency);
+      
+      const embedPanel = document.getElementById("embedPanel");
+      const embedFrame = document.getElementById("embedFrame");
+      const embedTitle = document.getElementById("embedTitle");
+      
+      embedPanel.style.display = "block";
+      
+      if (agency === 'Amtrak') {
+        embedTitle.innerHTML = "Amtrak Schedules";
+        embedFrame.src = "https://www.amtrak.com/train-schedules-timetables";
+      } else if (agency === 'CityBus') {
+        embedTitle.innerHTML = "Birmingham (BJCTA) Schedules";
+        embedFrame.src = "https://www.bjcta.org/routes-schedules/";
+      } else {
+        embedTitle.innerHTML = `${agency} Information`;
+        embedFrame.src = "https://www.alabamatransit.org/"; 
+      }
+    }
+
+    // Load only the basic modules first
+    require([
+      "esri/config",
+      "esri/Map",
+      "esri/views/MapView",
+      "esri/WebMap",
+      "esri/widgets/Search",
+      "esri/layers/FeatureLayer"
+    ], function(
+      esriConfig,
+      Map,
+      MapView,
+      WebMap,
+      Search,
+      FeatureLayer
+    ) {
+
+      console.log("Core Map & Search Modules loaded.");
+
+      resultsPanel = document.getElementById("resultsPanel");
+      sequentialListDiv = document.getElementById("sequentialListDiv");
+      embedPanel = document.getElementById("embedPanel");
+      embedFrame = document.getElementById("embedFrame");
+      embedTitle = document.getElementById("embedTitle");
+      planTripButton = document.getElementById("planTripButton");
+      
+      // Create the feature layers for querying
+      featureLayer = new FeatureLayer({
+        url: lineNetworkLayerUrl
+      });
+      
+      stopsLayer = new FeatureLayer({
+        url: stopsLayerUrl
+      });
+      
+      const webMap = new WebMap({
+        portalItem: { id: webmapId }
+      });
+
+      view = new MapView({
+        container: "viewDiv",
+        map: webMap
+      });
+      
+      searchStart = new Search({
+        view: view,
+        container: "searchStartDiv",
+        placeholder: "Enter Start Location..."
+      });
+
+      searchEnd = new Search({
+        view: view,
+        container: "searchEndDiv",
+        placeholder: "Enter End Location..."
+      });
+      
+      view.ui.add(document.getElementById("uiPanel"), "top-left");
+      console.log("UI Panel with Search widgets added.");
+
+      searchStart.on("select-result", function(event) {
+        startPoint = event.result.feature.geometry;
+        console.log("Start point set.");
+      });
+
+      searchEnd.on("select-result", function(event) {
+        endPoint = event.result.feature.geometry;
+        console.log("End point set.");
+      });
+
+      planTripButton.addEventListener("click", function() {
+        if (!startPoint || !endPoint) {
+          alert("Please select both a start and end location.");
+          return;
+        }
+        
+        console.log("Plan Trip clicked. Loading Graphic module...");
+        planTripButton.disabled = true;
+        planTripButton.textContent = "Planning...";
+        
+        // Load only the Graphic module
+        require([
+          "esri/Graphic"
+        ], function(Graphic_loaded) {
+          
+          console.log("Graphic module loaded.");
+          
+          Graphic = Graphic_loaded;
+
+          resultsPanel.style.display = "none";
+          embedPanel.style.display = "none";
+          sequentialListDiv.innerHTML = "";
+          view.graphics.removeAll();
+          
+          view.graphics.add(new Graphic_loaded({ 
+            geometry: startPoint, 
+            symbol: getPointSymbol("start") 
+          }));
+          view.graphics.add(new Graphic_loaded({ 
+            geometry: endPoint, 
+            symbol: getPointSymbol("end") 
+          }));
+          
+          runAlgorithm(startPoint, endPoint);
+        });
+      });
+
+      async function runAlgorithm(start, end) {
+        try {
+          console.log("=== SMART ROUTING ALGORITHM ===");
+          
+          // Step 1: Find nearest bus stops to start and end
+          const startNearestBusStop = await findNearestStop(start, 'City Bus');
+          const endNearestBusStop = await findNearestStop(end, 'City Bus');
+          
+          // Step 1b: Find nearest Amtrak stations
+          const startNearestAmtrak = await findAmtrakStation(start);
+          const endNearestAmtrak = await findAmtrakStation(end);
+          
+          // Calculate distances to bus stops (in miles)
+          let startToBusDistance = Infinity;
+          let endToBusDistance = Infinity;
+          let startToAmtrakDistance = Infinity;
+          let endToAmtrakDistance = Infinity;
+          
+          if (startNearestBusStop) {
+            const dx = startNearestBusStop.geometry.x - start.x;
+            const dy = startNearestBusStop.geometry.y - start.y;
+            startToBusDistance = Math.sqrt(dx * dx + dy * dy) * 0.000621371;
+          }
+          
+          if (endNearestBusStop) {
+            const dx = endNearestBusStop.geometry.x - end.x;
+            const dy = endNearestBusStop.geometry.y - end.y;
+            endToBusDistance = Math.sqrt(dx * dx + dy * dy) * 0.000621371;
+          }
+          
+          if (startNearestAmtrak) {
+            const dx = startNearestAmtrak.geometry.x - start.x;
+            const dy = startNearestAmtrak.geometry.y - start.y;
+            startToAmtrakDistance = Math.sqrt(dx * dx + dy * dy) * 0.000621371;
+          }
+          
+          if (endNearestAmtrak) {
+            const dx = endNearestAmtrak.geometry.x - end.x;
+            const dy = endNearestAmtrak.geometry.y - end.y;
+            endToAmtrakDistance = Math.sqrt(dx * dx + dy * dy) * 0.000621371;
+          }
+          
+          console.log(`Start to nearest bus stop: ${startToBusDistance.toFixed(2)} miles`);
+          console.log(`End to nearest bus stop: ${endToBusDistance.toFixed(2)} miles`);
+          console.log(`Start to nearest Amtrak: ${startToAmtrakDistance.toFixed(2)} miles`);
+          console.log(`End to nearest Amtrak: ${endToAmtrakDistance.toFixed(2)} miles`);
+          
+          // Step 2: Query what transit lines are at start/end points
+          const startResult = await featureLayer.queryFeatures(createQuery(start));
+          const endResult = await featureLayer.queryFeatures(createQuery(end));
+          
+          const startLine = startResult.features.length > 0 ? startResult.features[0].attributes : null;
+          const endLine = endResult.features.length > 0 ? endResult.features[0].attributes : null;
+          
+          let startMode = startLine ? startLine[MODE_FIELD] : 'None';
+          let endMode = endLine ? endLine[MODE_FIELD] : 'None';
+          let startAgency = startLine ? startLine[AGENCY_FIELD] : null;
+          let endAgency = endLine ? endLine[AGENCY_FIELD] : null;
+          
+          console.log("Start - Mode:", startMode, "Agency:", startAgency);
+          console.log("End - Mode:", endMode, "Agency:", endAgency);
+          
+          // Step 3: Calculate trip distance
+          const dx = end.x - start.x;
+          const dy = end.y - start.y;
+          const tripDistance = Math.sqrt(dx * dx + dy * dy) * 0.000621371;
+          console.log(`Total trip distance: ${tripDistance.toFixed(1)} miles`);
+          
+          // Step 4: DECISION LOGIC
+          const BUS_THRESHOLD = 0.5; // If within 0.5 miles of bus, use bus
+          const AMTRAK_THRESHOLD = 15; // If Amtrak station within 15 miles, it's accessible
+          const startCloseToBus = startToBusDistance <= BUS_THRESHOLD;
+          const endCloseToBus = endToBusDistance <= BUS_THRESHOLD;
+          const startCanReachAmtrak = startToAmtrakDistance <= AMTRAK_THRESHOLD;
+          const endCanReachAmtrak = endToAmtrakDistance <= AMTRAK_THRESHOLD;
+          
+          let steps = [];
+          let stepNum = 1;
+          let usesRuralTransit = false;
+          
+          // === DECISION TREE ===
+          
+          // CASE A: Both close to bus stops → Use fixed-route transit
+          if (startCloseToBus && endCloseToBus) {
+            console.log("CASE A: Both close to bus - use fixed-route transit");
+            const detailedSteps = await getDetailedFixedRouteSteps(start, end, 'City Bus', 'City Bus');
+            steps.push(...detailedSteps.map(s => s.replace('Step X:', `Step ${stepNum++}:`)));
+          }
+          
+          // CASE B: Long distance trip where Amtrak is accessible from both ends
+          else if (tripDistance > 50 && startCanReachAmtrak && endCanReachAmtrak) {
+            console.log("CASE B: Long distance with Amtrak access");
+            usesRuralTransit = true;
+            
+            const startAmtrakName = startNearestAmtrak.attributes.stop_name || 
+                                   startNearestAmtrak.attributes.StationName || 
+                                   "nearest Amtrak station";
+            const endAmtrakName = endNearestAmtrak.attributes.stop_name || 
+                                 endNearestAmtrak.attributes.StationName || 
+                                 "nearest Amtrak station";
+            
+            // Start point routing
+            if (startMode === 'Rural Transit' && !startCloseToBus) {
+              steps.push(`
+                <div class="step">
+                  <strong>Step ${stepNum++}:</strong> Call ${startAgency} for pickup
+                  <button class="step-button" onclick="showEmbed('${startAgency}')">${startAgency}</button>
+                  <p class="text-sm text-gray-600 mt-2">
+                    Request transport to <strong>${startAmtrakName}</strong><br>
+                    The station is approximately ${startToAmtrakDistance.toFixed(1)} miles away.
+                  </p>
+                </div>
+              `);
+            } else if (startCloseToBus) {
+              steps.push(`
+                <div class="step">
+                  <strong>Step ${stepNum++}:</strong> Take local bus to Amtrak
+                  <button class="step-button" onclick="window.open('${urbanTransitAgencies[startNearestBusStop.attributes.ntd_id]?.url || "#"}', '_blank')">View Routes</button>
+                  <p class="text-sm text-gray-600 mt-2">
+                    Board at nearest bus stop and ride to <strong>${startAmtrakName}</strong>
+                  </p>
+                </div>
+              `);
+            }
+            
+            // Amtrak segment
+            steps.push(`
+              <div class="step">
+                <strong>Step ${stepNum++}:</strong> Take Amtrak
+                <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak Schedules</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  <strong>From:</strong> ${startAmtrakName}<br>
+                  <strong>To:</strong> ${endAmtrakName}<br>
+                  <strong>Distance:</strong> Approximately ${tripDistance.toFixed(0)} miles<br>
+                  <em>Note: You may need to transfer between Amtrak lines. Check schedules for connections.</em>
+                </p>
+              </div>
+            `);
+            
+            // End point routing
+            if (endMode === 'Rural Transit' && !endCloseToBus) {
+              steps.push(`
+                <div class="step">
+                  <strong>Step ${stepNum++}:</strong> Call ${endAgency} for final pickup
+                  <button class="step-button" onclick="showEmbed('${endAgency}')">${endAgency}</button>
+                  <p class="text-sm text-gray-600 mt-2">
+                    Request pickup from <strong>${endAmtrakName}</strong> to your final destination<br>
+                    Distance from station: ${endToAmtrakDistance.toFixed(1)} miles
+                  </p>
+                </div>
+              `);
+            } else if (endCloseToBus) {
+              steps.push(`
+                <div class="step">
+                  <strong>Step ${stepNum++}:</strong> Take local bus from Amtrak
+                  <button class="step-button" onclick="window.open('${urbanTransitAgencies[endNearestBusStop.attributes.ntd_id]?.url || "#"}', '_blank')">View Routes</button>
+                  <p class="text-sm text-gray-600 mt-2">
+                    From <strong>${endAmtrakName}</strong>, board local bus to your destination
+                  </p>
+                </div>
+              `);
+            }
+          }
+          
+          // CASE C: Start far from bus, end close to bus → Rural transit to bus, then bus
+          else if (!startCloseToBus && endCloseToBus && startMode === 'Rural Transit') {
+            console.log("CASE C: Start rural, end near bus");
+            usesRuralTransit = true;
+            steps.push(getStepHtml(stepNum++, `Call ${startAgency} to take you to the nearest bus stop`, startAgency));
+            
+            const endSteps = await getDetailedRouteSteps(end, 'City Bus', 'end');
+            steps.push(...endSteps.map(s => s.replace('Step X:', `Step ${stepNum++}:`)));
+          }
+          
+          // CASE D: Start close to bus, end far from bus → Bus, then rural transit
+          else if (startCloseToBus && !endCloseToBus && endMode === 'Rural Transit') {
+            console.log("CASE D: Start near bus, end rural");
+            usesRuralTransit = true;
+            const startSteps = await getDetailedRouteSteps(start, 'City Bus', 'start');
+            steps.push(...startSteps.map(s => s.replace('Step X:', `Step ${stepNum++}:`)));
+            
+            steps.push(getStepHtml(stepNum++, `Call ${endAgency} for pickup from bus stop to final destination`, endAgency));
+          }
+          
+          // CASE E: Both far from bus, same rural agency, reasonable distance → Direct rural transit
+          else if (!startCloseToBus && !endCloseToBus && 
+                   startMode === 'Rural Transit' && endMode === 'Rural Transit' &&
+                   startAgency === endAgency && tripDistance < 30) {
+            console.log("CASE E: Both rural, same agency, close together - direct rural transit");
+            usesRuralTransit = true;
+            steps.push(getStepHtml(stepNum++, `Call ${startAgency} for direct transport to your destination`, startAgency));
+          }
+          
+          // CASE F: Both far from bus, different rural agencies → Multi-modal with fixed-route
+          else if (!startCloseToBus && !endCloseToBus && 
+                   startMode === 'Rural Transit' && endMode === 'Rural Transit' &&
+                   startAgency !== endAgency) {
+            console.log("CASE F: Both rural, different agencies - need fixed-route connection");
+            usesRuralTransit = true;
+            steps.push(getStepHtml(stepNum++, `Call ${startAgency} to take you to the nearest City Bus or Amtrak stop`, startAgency));
+            steps.push(getFixedRouteStep(stepNum++));
+            steps.push(getStepHtml(stepNum++, `Call ${endAgency} for pickup from City Bus/Amtrak stop to final destination`, endAgency));
+          }
+          
+          // CASE G: Start far from bus but bus service area exists between start and end
+          else if (!startCloseToBus && startMode === 'Rural Transit' && endNearestBusStop) {
+            console.log("CASE G: Start rural but bus service exists - rural to bus");
+            usesRuralTransit = true;
+            steps.push(getStepHtml(stepNum++, `Call ${startAgency} to take you to the nearest bus stop`, startAgency));
+            
+            // Check if end needs rural transit too
+            if (!endCloseToBus && endMode === 'Rural Transit') {
+              const busSteps = await getDetailedFixedRouteSteps(
+                startNearestBusStop.geometry, 
+                endNearestBusStop.geometry, 
+                'City Bus', 
+                'City Bus'
+              );
+              steps.push(...busSteps.map(s => s.replace('Step X:', `Step ${stepNum++}:`)));
+              steps.push(getStepHtml(stepNum++, `Call ${endAgency} for pickup from bus stop to final destination`, endAgency));
+            } else {
+              const endSteps = await getDetailedRouteSteps(end, 'City Bus', 'end');
+              steps.push(...endSteps.map(s => s.replace('Step X:', `Step ${stepNum++}:`)));
+            }
+          }
+          
+          // CASE H: One or both points on Amtrak lines
+          else if (startMode === 'Amtrak' || endMode === 'Amtrak') {
+            console.log("CASE H: Amtrak involved");
+            const detailedSteps = await getDetailedFixedRouteSteps(start, end, startMode, endMode);
+            steps.push(...detailedSteps.map(s => s.replace('Step X:', `Step ${stepNum++}:`)));
+          }
+          
+          // CASE I: No service found
+          else {
+            console.log("CASE I: No service available");
+            steps.push(`
+              <div class="step p-4 rounded-md bg-yellow-100 border border-yellow-300 text-yellow-900">
+                <strong>No transit service found:</strong> Neither your start nor end location appears to be within reasonable distance of transit service.<br>
+                <small>Start is ${startToBusDistance.toFixed(1)} miles from nearest bus. End is ${endToBusDistance.toFixed(1)} miles from nearest bus.</small>
+              </div>
+            `);
+          }
+          
+          // Add rural transit warning if needed
+          if (usesRuralTransit) {
+            steps.unshift(`
+              <div class="step p-4 rounded-md bg-blue-100 border border-blue-300 text-blue-900">
+                <strong>⚠️ Important:</strong> Call the rural transit agency <strong>before</strong> purchasing any bus or Amtrak tickets to confirm they can provide service for your trip.
+              </div>
+            `);
+          }
+          
+          if (steps.length === 0) {
+            steps.push(`
+              <div class="step p-4 rounded-md bg-red-100 border border-red-300 text-red-900">
+                <strong>Error:</strong> Unable to determine route. Please try different locations.
+              </div>
+            `);
+          }
+          
+          sequentialListDiv.innerHTML = steps.join('');
+          resultsPanel.style.display = "block";
+          console.log("=== ROUTING COMPLETE ===");
+          
+        } catch (error) {
+          console.error("Algorithm failed:", error);
+          console.error("Error details:", error.message, error.details);
+          alert("Could not plan trip. Check console for details. Error: " + error.message);
+        } finally {
+          planTripButton.disabled = false;
+          planTripButton.textContent = "Plan Trip";
+        }
+      }
+      
+      function createQuery(point) {
+        return {
+          geometry: point,
+          spatialRelationship: "intersects", 
+          distance: 1000, 
+          units: "meters",
+          outFields: [MODE_FIELD, AGENCY_FIELD], 
+          returnGeometry: false,
+          num: 1 
+        };
+      }
+      
+      function getStepHtml(stepNum, description, agency) {
+        return `
+          <div class="step">
+            <strong>Step ${stepNum}:</strong> ${description}
+            <button class="step-button" onclick="showEmbed('${agency}')">${agency}</button>
+          </div>
+        `;
+      }
+
+      function getFixedRouteStep(stepNum) {
+        return `
+          <div class="step">
+            <strong>Step ${stepNum}:</strong> Take Fixed-Route Transit
+            <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak</button>
+            <button class="step-button" onclick="showEmbed('CityBus')">City Bus</button>
+            <p class="text-sm text-gray-600 mt-2">
+              Use the primary bus or rail network. Click a button to see schedules.
+            </p>
+          </div>
+        `;
+      }
+      
+      function getDetailedFixedRouteStep(stepNum, startMode, endMode) {
+        if (startMode === 'City Bus' && endMode === 'City Bus') {
+          return `
+            <div class="step">
+              <strong>Step ${stepNum}:</strong> Take City Bus
+              <button class="step-button" onclick="showEmbed('CityBus')">View Routes & Schedules</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Directions:</strong><br>
+                1. Find the nearest bus stop to your starting location<br>
+                2. Use the route map to identify which route connects your start and end points<br>
+                3. Board the bus and ride to a stop near your destination<br>
+                4. If no direct route exists, you may need to transfer at a transit hub
+              </p>
+            </div>
+          `;
+        } else if (startMode === 'Amtrak' && endMode === 'Amtrak') {
+          return `
+            <div class="step">
+              <strong>Step ${stepNum}:</strong> Take Amtrak
+              <button class="step-button" onclick="showEmbed('Amtrak')">View Schedules</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Directions:</strong><br>
+                1. Go to the nearest Amtrak station<br>
+                2. Check the schedule for trains heading to your destination<br>
+                3. Purchase a ticket and board the train<br>
+                4. Arrive at the station nearest your destination
+              </p>
+            </div>
+          `;
+        }
+      }
+      
+      function getCityBusToAmtrakStep(stepNum) {
+        return `
+          <div class="step">
+            <strong>Step ${stepNum}:</strong> Multi-Modal Trip (Bus to Train)
+            <button class="step-button" onclick="showEmbed('CityBus')">City Bus</button>
+            <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak</button>
+            <p class="text-sm text-gray-600 mt-2">
+              <strong>Directions:</strong><br>
+              1. Take a city bus to the nearest Amtrak station<br>
+              2. Check which bus routes serve the Amtrak station<br>
+              3. Transfer to Amtrak at the station<br>
+              4. Take the train to your final destination
+            </p>
+          </div>
+        `;
+      }
+      
+      function getAmtrakToCityBusStep(stepNum) {
+        return `
+          <div class="step">
+            <strong>Step ${stepNum}:</strong> Multi-Modal Trip (Train to Bus)
+            <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak</button>
+            <button class="step-button" onclick="showEmbed('CityBus')">City Bus</button>
+            <p class="text-sm text-gray-600 mt-2">
+              <strong>Directions:</strong><br>
+              1. Take Amtrak to the station nearest your destination<br>
+              2. Exit the train station and locate nearby bus stops<br>
+              3. Board a city bus that goes near your final destination<br>
+              4. Check the bus route map for the best connection
+            </p>
+          </div>
+        `;
+      }
+      
+      // NEW PHASE 2 FUNCTIONS
+      
+      async function findNearestStop(point, travelMode) {
+        try {
+          console.log(`Finding nearest ${travelMode} stop to point:`, point);
+          
+          // Query stops near the point
+          const stopQuery = {
+            geometry: point,
+            distance: 2000, // 2km search radius
+            units: "meters",
+            spatialRelationship: "intersects",
+            outFields: ["stop_id", "stop_name", "stop_code", "ntd_id"],
+            returnGeometry: true,
+            orderByFields: "OBJECTID",
+            num: 10
+          };
+          
+          const stopsResult = await stopsLayer.queryFeatures(stopQuery);
+          console.log(`Found ${stopsResult.features.length} stops nearby`);
+          
+          if (stopsResult.features.length === 0) return null;
+          
+          // Find the closest stop
+          let closestStop = null;
+          let minDistance = Infinity;
+          
+          for (let stopFeature of stopsResult.features) {
+            const stopGeom = stopFeature.geometry;
+            const dx = stopGeom.x - point.x;
+            const dy = stopGeom.y - point.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            if (distance < minDistance) {
+              minDistance = distance;
+              closestStop = stopFeature;
+            }
+          }
+          
+          console.log("Closest stop:", closestStop.attributes);
+          return closestStop;
+          
+        } catch (error) {
+          console.error("Error finding nearest stop:", error);
+          return null;
+        }
+      }
+      
+      async function findRoutesAtStop(stopId, stopGeometry) {
+        try {
+          console.log("Finding routes at stop:", stopId);
+          
+          // Query lines that pass near this stop
+          const routeQuery = {
+            geometry: stopGeometry,
+            distance: 100, // 100m buffer around stop
+            units: "meters",
+            spatialRelationship: "intersects",
+            outFields: ["Name", "route_short_name", "route_long_name"],
+            returnGeometry: false,
+            where: "Travel_Mode = 'City Bus'"
+          };
+          
+          const routesResult = await featureLayer.queryFeatures(routeQuery);
+          console.log(`Found ${routesResult.features.length} routes at stop`);
+          
+          // Get unique route names
+          const routeNames = [...new Set(
+            routesResult.features
+              .map(f => f.attributes.Name)
+              .filter(name => name)
+          )];
+          
+          return routeNames;
+          
+        } catch (error) {
+          console.error("Error finding routes:", error);
+          return [];
+        }
+      }
+      
+      async function findAmtrakStation(cityPoint) {
+        try {
+          console.log("Finding nearest Amtrak station...");
+          
+          // Query for Amtrak stations near the city
+          const stationQuery = {
+            geometry: cityPoint,
+            distance: 15000, // 15km search radius for stations
+            units: "meters",
+            spatialRelationship: "intersects",
+            outFields: ["stop_id", "stop_name", "stop_code", "ntd_id", "StationName"],
+            returnGeometry: true,
+            where: "stop_name LIKE '%Amtrak%' OR stop_name LIKE '%Station%' OR StationName IS NOT NULL",
+            num: 5
+          };
+          
+          const stationsResult = await stopsLayer.queryFeatures(stationQuery);
+          console.log(`Found ${stationsResult.features.length} potential stations`);
+          
+          if (stationsResult.features.length === 0) return null;
+          
+          // Find closest station
+          let closestStation = null;
+          let minDistance = Infinity;
+          
+          for (let station of stationsResult.features) {
+            const dx = station.geometry.x - cityPoint.x;
+            const dy = station.geometry.y - cityPoint.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            if (distance < minDistance) {
+              minDistance = distance;
+              closestStation = station;
+            }
+          }
+          
+          console.log("Closest Amtrak station:", closestStation.attributes);
+          return closestStation;
+          
+        } catch (error) {
+          console.error("Error finding Amtrak station:", error);
+          return null;
+        }
+      }
+      
+      async function findBusRoutesToAmtrak(cityPoint, agencyNtdId) {
+        try {
+          console.log("Finding bus routes to Amtrak station...");
+          
+          // Find Amtrak station
+          const amtrakStation = await findAmtrakStation(cityPoint);
+          if (!amtrakStation) {
+            console.log("No Amtrak station found nearby");
+            return { routes: [], stationName: "the Amtrak station" };
+          }
+          
+          const stationName = amtrakStation.attributes.stop_name || 
+                             amtrakStation.attributes.StationName || 
+                             "Amtrak Station";
+          
+          // Find bus routes near the Amtrak station
+          const routeQuery = {
+            geometry: amtrakStation.geometry,
+            distance: 200, // 200m around station
+            units: "meters",
+            spatialRelationship: "intersects",
+            outFields: ["Name", "route_short_name", "route_long_name"],
+            returnGeometry: false,
+            where: "Travel_Mode = 'City Bus'"
+          };
+          
+          const routesResult = await featureLayer.queryFeatures(routeQuery);
+          console.log(`Found ${routesResult.features.length} bus routes near Amtrak`);
+          
+          // Get unique route names
+          const routeNames = [...new Set(
+            routesResult.features
+              .map(f => f.attributes.Name)
+              .filter(name => name)
+          )];
+          
+          return { 
+            routes: routeNames, 
+            stationName: stationName 
+          };
+          
+        } catch (error) {
+          console.error("Error finding routes to Amtrak:", error);
+          return { routes: [], stationName: "the Amtrak station" };
+        }
+      }
+      
+      function getAgencyInfo(ntdId) {
+        return urbanTransitAgencies[ntdId] || {
+          name: "City Bus",
+          city: "Local",
+          url: "https://www.bjcta.org/routes-schedules/"
+        };
+      }
+      
+      async function getDetailedFixedRouteSteps(startPoint, endPoint, startMode, endMode) {
+        const steps = [];
+        
+        // Find nearest stops
+        const startStop = await findNearestStop(startPoint, startMode);
+        const endStop = await findNearestStop(endPoint, endMode);
+        
+        if (!startStop || !endStop) {
+          return [getFixedRouteStep('X')];
+        }
+        
+        const startStopName = startStop.attributes.stop_name || 'nearest stop';
+        const endStopName = endStop.attributes.stop_name || 'destination stop';
+        const startNtdId = startStop.attributes.ntd_id;
+        const endNtdId = endStop.attributes.ntd_id;
+        
+        const startAgencyInfo = getAgencyInfo(startNtdId);
+        const endAgencyInfo = getAgencyInfo(endNtdId);
+        
+        // Find routes at each stop
+        const startRoutes = await findRoutesAtStop(startStop.attributes.stop_id, startStop.geometry);
+        const endRoutes = await findRoutesAtStop(endStop.attributes.stop_id, endStop.geometry);
+        
+        console.log("Start routes:", startRoutes);
+        console.log("End routes:", endRoutes);
+        
+        // Calculate distance between start and end
+        const dx = endPoint.x - startPoint.x;
+        const dy = endPoint.y - startPoint.y;
+        const distanceMeters = Math.sqrt(dx * dx + dy * dy);
+        const distanceMiles = distanceMeters * 0.000621371;
+        
+        console.log(`Distance: ${distanceMiles.toFixed(1)} miles`);
+        console.log(`Start city: ${startAgencyInfo.city}, End city: ${endAgencyInfo.city}`);
+        
+        // Check if inter-city (different agencies OR distance > 25 miles)
+        const isInterCity = (startNtdId !== endNtdId) || distanceMiles > 25;
+        
+        // Case 1: Both City Bus
+        if (startMode === 'City Bus' && endMode === 'City Bus') {
+          if (isInterCity) {
+            // Inter-city trip - needs Amtrak
+            const routeText = startRoutes.length > 0 ? 
+              `Routes serving this stop: ${startRoutes.join(', ')}` : 
+              'Check route map for routes to Amtrak station';
+            
+            steps.push(`
+              <div class="step">
+                <strong>Step X:</strong> Board ${startAgencyInfo.name} bus
+                <button class="step-button" onclick="window.open('${startAgencyInfo.url}', '_blank')">View Routes</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  <strong>Board at:</strong> ${startStopName} (${startAgencyInfo.city})<br>
+                  ${routeText}<br>
+                  Take a bus heading to the Amtrak station.
+                </p>
+              </div>
+            `);
+            
+            steps.push(`
+              <div class="step">
+                <strong>Step X:</strong> Transfer to Amtrak
+                <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak Schedules</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  <strong>Important:</strong> ${startAgencyInfo.city} and ${endAgencyInfo.city} are different cities (approximately ${distanceMiles.toFixed(0)} miles apart).<br>
+                  Transfer at ${startAgencyInfo.city}'s Amtrak station and board a train toward ${endAgencyInfo.city}.
+                </p>
+              </div>
+            `);
+            
+            steps.push(`
+              <div class="step">
+                <strong>Step X:</strong> Arrive at ${endAgencyInfo.city} Amtrak station
+                <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak Info</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  Exit the train and look for ${endAgencyInfo.name} bus connections.
+                </p>
+              </div>
+            `);
+            
+            const endRouteText = endRoutes.length > 0 ? 
+              `Routes serving this stop: ${endRoutes.join(', ')}` : 
+              'Check route map for available routes';
+            
+            steps.push(`
+              <div class="step">
+                <strong>Step X:</strong> Take ${endAgencyInfo.name} bus to final destination
+                <button class="step-button" onclick="window.open('${endAgencyInfo.url}', '_blank')">View ${endAgencyInfo.city} Routes</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  <strong>Get off at:</strong> ${endStopName}<br>
+                  ${endRouteText}<br>
+                  This stop is near your final destination in ${endAgencyInfo.city}.
+                </p>
+              </div>
+            `);
+          } else {
+            // Same city trip
+            const routeText = startRoutes.length > 0 ? 
+              `Routes: ${startRoutes.join(', ')}` : 
+              'Check which routes serve this stop';
+            
+            steps.push(`
+              <div class="step">
+                <strong>Step X:</strong> Board ${startAgencyInfo.name} bus
+                <button class="step-button" onclick="window.open('${startAgencyInfo.url}', '_blank')">View Routes</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  <strong>Board at:</strong> ${startStopName}<br>
+                  ${routeText}
+                </p>
+              </div>
+            `);
+            
+            const endRouteText = endRoutes.length > 0 ? 
+              `Routes: ${endRoutes.join(', ')}` : 
+              'Check route map for connections';
+            
+            steps.push(`
+              <div class="step">
+                <strong>Step X:</strong> Ride to your destination
+                <button class="step-button" onclick="window.open('${startAgencyInfo.url}', '_blank')">View Schedules</button>
+                <p class="text-sm text-gray-600 mt-2">
+                  <strong>Get off at:</strong> ${endStopName}<br>
+                  ${endRouteText}<br>
+                  You may need to transfer at a transit center if no direct route exists.
+                </p>
+              </div>
+            `);
+          }
+        }
+        
+        // Other cases (Amtrak, mixed mode) remain similar but with agency info...
+        else if (startMode === 'Amtrak' && endMode === 'Amtrak') {
+          steps.push(`
+            <div class="step">
+              <strong>Step X:</strong> Go to Amtrak Station
+              <button class="step-button" onclick="showEmbed('Amtrak')">View Schedules</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Nearest Station:</strong> ${startStopName}<br>
+                Check train schedules and purchase your ticket.
+              </p>
+            </div>
+          `);
+          
+          steps.push(`
+            <div class="step">
+              <strong>Step X:</strong> Arrive at destination station
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Destination Station:</strong> ${endStopName}
+              </p>
+            </div>
+          `);
+        }
+        else if (startMode === 'City Bus' && endMode === 'Amtrak') {
+          steps.push(`
+            <div class="step">
+              <strong>Step X:</strong> Board ${startAgencyInfo.name} bus
+              <button class="step-button" onclick="window.open('${startAgencyInfo.url}', '_blank')">View Routes</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Start at:</strong> ${startStopName}<br>
+                Look for routes that serve the Amtrak station.
+              </p>
+            </div>
+          `);
+          
+          steps.push(`
+            <div class="step">
+              <strong>Step X:</strong> Transfer to Amtrak
+              <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak Schedules</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Destination:</strong> ${endStopName}<br>
+                Purchase ticket and board train.
+              </p>
+            </div>
+          `);
+        }
+        else if (startMode === 'Amtrak' && endMode === 'City Bus') {
+          steps.push(`
+            <div class="step">
+              <strong>Step X:</strong> Board Amtrak
+              <button class="step-button" onclick="showEmbed('Amtrak')">Amtrak Schedules</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Depart from:</strong> ${startStopName}<br>
+                Take train to ${endAgencyInfo.city}.
+              </p>
+            </div>
+          `);
+          
+          steps.push(`
+            <div class="step">
+              <strong>Step X:</strong> Transfer to ${endAgencyInfo.name}
+              <button class="step-button" onclick="window.open('${endAgencyInfo.url}', '_blank')">View Routes</button>
+              <p class="text-sm text-gray-600 mt-2">
+                <strong>Final Stop:</strong> ${endStopName}<br>
+                Look for bus routes near the train station.
+              </p>
+            </div>
+          `);
+        }
+        
+        return steps;
+      }
+      
+      async function getDetailedRouteSteps(point, mode, type) {
+        const stop = await findNearestStop(point, mode);
+        const stopName = stop ? (stop.attributes.stop_name || 'nearest stop') : 'nearest stop';
+        
+        if (type === 'start') {
+          return [`
+            <div class="step">
+              <strong>Step X:</strong> Board ${mode} at ${stopName}
+              <button class="step-button" onclick="showEmbed('${mode === 'Amtrak' ? 'Amtrak' : 'CityBus'}')">${mode} Info</button>
+            </div>
+          `];
+        } else {
+          return [`
+            <div class="step">
+              <strong>Step X:</strong> Get off at ${stopName}
+              <button class="step-button" onclick="showEmbed('${mode === 'Amtrak' ? 'Amtrak' : 'CityBus'}')">${mode} Info</button>
+            </div>
+          `];
+        }
+      }
+      
+      function getPointSymbol(type) {
+        return {
+          type: "simple-marker",
+          color: (type === "start") ? [0, 122, 194] : [226, 119, 40],
+          size: "12px",
+          outline: { color: [255, 255, 255], width: 1.5 }
+        };
+      }
+
+    });
+  </script>
+</body>
+</html>
